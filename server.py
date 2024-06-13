@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 is_gunicorn = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if not is_gunicorn:
     args = parse_args()
 else:
@@ -70,8 +70,8 @@ def load_models():
         pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
     elif args.scheduler == "euler_a":
         pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-
-    pipe.to("cuda")
+    
+    pipe.to(device)
     #pipe.enable_vae_slicing()
     #pipe.enable_attention_slicing()
 
@@ -110,12 +110,12 @@ def generate_image():
         init_image = Image.new("RGB", (width, height))
         init_image_tensor = torch.from_numpy(np.array(init_image)).float() / 255.0
         init_image_tensor = init_image_tensor.permute(2, 0, 1).unsqueeze(0)
-        init_image_tensor = init_image_tensor.half().cuda()
+        init_image_tensor = init_image_tensor.half().to(device)
 
         white_mask = Image.new("L", (width, height), 255)
         while_mask_tensor = torch.from_numpy(np.array(white_mask)).float() / 255.0
         while_mask_tensor = while_mask_tensor.unsqueeze(0).unsqueeze(0)
-        while_mask_tensor = while_mask_tensor.half().cuda()
+        while_mask_tensor = while_mask_tensor.half().to(device)
 
         generated_image = pipe(
             prompt,
@@ -248,9 +248,9 @@ def generate_img2img():
             composite_mask_tensor = composite_mask_tensor.unsqueeze(0).unsqueeze(0)
 
         # Convert to fp16 and move to CUDA
-        composite_image_tensor = composite_image_tensor.half().cuda()
+        composite_image_tensor = composite_image_tensor.half().to(device)
         if composite_mask_tensor is not None:
-            composite_mask_tensor = composite_mask_tensor.half().cuda()
+            composite_mask_tensor = composite_mask_tensor.half().to(device)
 
         # Print size
         #print(composite_image_tensor.size())
