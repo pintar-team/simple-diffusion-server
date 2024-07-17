@@ -35,7 +35,7 @@ else:
 
 def load_models():
     print("Loading models...")
-    vae = None
+
     if args.vae == '':
         if args.unet == '':
             if is_local_file(args.model):
@@ -49,6 +49,7 @@ def load_models():
             else:
                 pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, unet=unet, torch_dtype=torch.bfloat16, variant="fp16")
     else:
+        vae = AutoencoderKL.from_pretrained(args.vae, torch_dtype=torch.bfloat16, variant="fp16")
         if args.unet == '':
             if is_local_file(args.model):
                 pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, vae=vae, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
