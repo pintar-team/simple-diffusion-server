@@ -37,24 +37,29 @@ def load_models():
     print("Loading models...")
     vae = None
     if args.vae == '':
-        vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.bfloat16)
-    else:
-        if is_local_file(args.vae):
-            vae = AutoencoderKL.from_single_file(args.vae, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True)
+        if args.unet == '':
+            if is_local_file(args.model):
+                pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
+            else:    
+                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, torch_dtype=torch.bfloat16, variant="fp16")
         else:
-            vae = AutoencoderKL.from_pretrained(args.vae, torch_dtype=torch.bfloat16, variant="fp16")
-
-    if args.unet == '':
-        if is_local_file(args.model):
-            pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, vae=vae, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
-        else:    
-            pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, vae=vae, torch_dtype=torch.bfloat16, variant="fp16")
+            unet = UNet2DConditionModel.from_pretrained(args.unet, torch_dtype=torch.bfloat16, variant="fp16")
+            if is_local_file(args.model):
+                pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, unet=unet, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
+            else:
+                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, unet=unet, torch_dtype=torch.bfloat16, variant="fp16")
     else:
-        unet = UNet2DConditionModel.from_pretrained(args.unet, torch_dtype=torch.bfloat16, variant="fp16")
-        if is_local_file(args.model):
-            pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
+        if args.unet == '':
+            if is_local_file(args.model):
+                pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, vae=vae, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
+            else:    
+                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, vae=vae, torch_dtype=torch.bfloat16, variant="fp16")
         else:
-            pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16")
+            unet = UNet2DConditionModel.from_pretrained(args.unet, torch_dtype=torch.bfloat16, variant="fp16")
+            if is_local_file(args.model):
+                pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
+            else:
+                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16")
 
     lora_dirs = args.lora_dirs.split(':') if args.lora_dirs else []
     lora_scales = [float(scale) for scale in args.lora_scales.split(':')] if args.lora_scales else []
