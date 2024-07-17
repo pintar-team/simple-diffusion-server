@@ -36,7 +36,7 @@ else:
 def load_models():
     print("Loading models...")
 
-    if args.vae == '':
+    if args.vae == '' or args.vae == 'baked':
         if args.unet == '':
             if is_local_file(args.model):
                 pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
