@@ -7,3 +7,4 @@ gunicorn
 safetensors
 accelerate
 transformers
+xformers

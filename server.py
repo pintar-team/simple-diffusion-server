@@ -1,20 +1,35 @@
 import os
-from flask import Flask, request, jsonify
-from diffusers import UNet2DConditionModel, StableDiffusionXLPipeline, StableDiffusionXLInpaintPipeline, EulerDiscreteScheduler, EulerAncestralDiscreteScheduler, AutoencoderKL
-import torch
-from PIL import Image, ImageOps
 import io
 import base64
 import logging
+from typing import Optional, Tuple, List, Dict, Any
+
+import torch
 import numpy as np
+from PIL import Image
+from flask import Flask, request, jsonify
+from diffusers import (
+    UNet2DConditionModel,
+    StableDiffusionXLPipeline,
+    StableDiffusionXLInpaintPipeline,
+    EulerDiscreteScheduler,
+    EulerAncestralDiscreteScheduler,
+    AutoencoderKL
+)
 
-from utils import parse_args, Args, is_local_file
+from utils import parse_args, Args, is_local_file, process_image_data, compose_images
 
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Check if running with Gunicorn
 is_gunicorn = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
+
+# Set device (CPU or CUDA)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load configuration
 if not is_gunicorn:
     args = parse_args()
 else:
@@ -29,39 +44,47 @@ else:
         vae=os.getenv('VAE_MODEL', 'madebyollin/sdxl-vae-fp16-fix')
     )
 
-
-
-#vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.bfloat16)
-
-def load_models():
-    print("Loading models...")
-
+def load_models() -> StableDiffusionXLInpaintPipeline:
+    """
+    Load and configure the Stable Diffusion XL models.
+    """
+    logger.info("Loading models...")
+    
     if args.vae == '' or args.vae == 'baked':
-        if args.unet == '':
-            if is_local_file(args.model):
-                pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
-            else:    
-                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, torch_dtype=torch.bfloat16, variant="fp16")
-        else:
-            unet = UNet2DConditionModel.from_pretrained(args.unet, torch_dtype=torch.bfloat16, variant="fp16")
-            if is_local_file(args.model):
-                pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, unet=unet, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
-            else:
-                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, unet=unet, torch_dtype=torch.bfloat16, variant="fp16")
+        vae = None
     else:
         vae = AutoencoderKL.from_pretrained(args.vae, torch_dtype=torch.bfloat16, variant="fp16")
-        if args.unet == '':
-            if is_local_file(args.model):
-                pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, vae=vae, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
-            else:    
-                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, vae=vae, torch_dtype=torch.bfloat16, variant="fp16")
-        else:
-            unet = UNet2DConditionModel.from_pretrained(args.unet, torch_dtype=torch.bfloat16, variant="fp16")
-            if is_local_file(args.model):
-                pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16", use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True)
-            else:
-                pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16")
 
+    if args.unet:
+        unet = UNet2DConditionModel.from_pretrained(args.unet, torch_dtype=torch.bfloat16, variant="fp16")
+    else:
+        unet = None
+
+    if is_local_file(args.model):
+        pipe = StableDiffusionXLInpaintPipeline.from_single_file(
+            args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16",
+            use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True
+        )
+    else:
+        pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
+            args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16"
+        )
+
+    load_and_fuse_lora(pipe)
+    set_scheduler(pipe)
+
+    pipe.to(device)
+    # Uncomment the following lines if you want to enable these optimizations
+    pipe.enable_vae_slicing()
+    pipe.enable_attention_slicing()
+
+    logger.info("Models loaded successfully")
+    return pipe
+
+def load_and_fuse_lora(pipe: StableDiffusionXLInpaintPipeline) -> None:
+    """
+    Load and fuse LoRA weights to the pipeline.
+    """
     lora_dirs = args.lora_dirs.split(':') if args.lora_dirs else []
     lora_scales = [float(scale) for scale in args.lora_scales.split(':')] if args.lora_scales else []
 
@@ -72,242 +95,203 @@ def load_models():
         pipe.load_lora_weights(ldir)
         pipe.fuse_lora(lora_scale=lsc)
 
+def set_scheduler(pipe: StableDiffusionXLInpaintPipeline) -> None:
+    """
+    Set the appropriate scheduler for the pipeline.
+    """
     if args.scheduler == "euler":
         pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
     elif args.scheduler == "euler_a":
         pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-    
-    pipe.to(device)
-    #pipe.enable_vae_slicing()
-    #pipe.enable_attention_slicing()
 
-    print("Models loaded")
-    return pipe
-
+# Load models
 pipe = load_models()
 
+# Initialize Flask app
 app = Flask(__name__)
 
 @app.route('/generate-image', methods=['POST'])
 def generate_image():
     try:
         data = request.json
-        prompt = data.get("prompt")
-        negative_prompt = data.get("negative_prompt", None)
-        num_inference_steps = data.get("num_inference_steps", 30)
-        guidance_scale = data.get("guidance_scale", 7.5)
-        seed = data.get("seed", None)
-        image_format = data.get("format", "jpeg").lower()
-
-        original_width = data.get("width", 1024)
-        original_height = data.get("height", 1024)
-
-        width = ((original_width + 7) // 8) * 8
-        height = ((original_height + 7) // 8) * 8
-
-        if seed is not None:
-            generator = torch.manual_seed(seed)
-        else:
-            generator = None
-
-        if image_format not in ["jpeg", "png"]:
-            return jsonify({"error": "Invalid image format. Choose 'jpeg' or 'png'."}), 400
-
-        init_image = Image.new("RGB", (width, height))
-        init_image_tensor = torch.from_numpy(np.array(init_image)).float() / 255.0
-        init_image_tensor = init_image_tensor.permute(2, 0, 1).unsqueeze(0)
-        init_image_tensor = init_image_tensor.half().to(device)
-
-        white_mask = Image.new("L", (width, height), 255)
-        while_mask_tensor = torch.from_numpy(np.array(white_mask)).float() / 255.0
-        while_mask_tensor = while_mask_tensor.unsqueeze(0).unsqueeze(0)
-        while_mask_tensor = while_mask_tensor.half().to(device)
-
-        generated_image = pipe(
-            prompt,
-            negative_prompt=negative_prompt,
-            image=init_image_tensor,
-            mask_image=while_mask_tensor,
-            height=height,
-            width=width,
-            strength=1,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator
-        ).images[0]
-
-        gen_width, gen_height = generated_image.size
-        if (gen_width != original_width) or (gen_width != original_height):
-            left = (gen_width - original_width) // 2
-            top = (gen_height - original_height) // 2
-            right = left + original_width
-            bottom = top + original_height
-            generated_image = generated_image.crop((left, top, right, bottom))
-
-        buffer = io.BytesIO()
-        if image_format == "jpeg":
-            # Convert the image to RGB color mode for JPEG format
-            generated_image = generated_image.convert("RGB")
-
-        generated_image.save(buffer, format=image_format)
-        mime_type = "image/jpeg" if image_format == "jpeg" else "image/png"
-        data_uri = "data:" + mime_type + ";base64," + base64.b64encode(buffer.getvalue()).decode('utf-8')
-
-        return jsonify({"image": data_uri})
+        image_params = parse_image_params(data)
+        
+        init_image, init_mask = create_init_image_and_mask(image_params['width'], image_params['height'])
+        
+        generated_image = generate_image_with_pipe(pipe, image_params, init_image, init_mask)
+        
+        return jsonify({"image": encode_image(generated_image, image_params['format'])})
 
     except Exception as e:
         logger.exception("Error generating image")
         return jsonify({"error": str(e)}), 500
-    
+
 @app.route('/generate-img2img', methods=['POST'])
 def generate_img2img():
     try:
         data = request.json
-        prompt = data.get("prompt")
-        negative_prompt = data.get("negative_prompt", None)
-        num_inference_steps = data.get("num_inference_steps", 30)
-        guidance_scale = data.get("guidance_scale", 7.5)
-        seed = data.get("seed", None)
-        image_format = data.get("format", "jpeg").lower()
-        strength = data.get("strength", 0.8)
-        extract_mask = data.get("extract_mask", False)
-        apply_mask = data.get("apply_mask", True)
-        # Parse the extract_color parameter
-        extract_color = data.get("extract_color", (0, 0, 0, 0))
-        if isinstance(extract_color, list):
-            extract_color = tuple(extract_color)
-        elif isinstance(extract_color, str):
-            extract_color = tuple(map(int, extract_color.split(",")))
-        else:
-            extract_color = (0, 0, 0, 0)  # Default to transparent black if invalid format
-
-
-        original_width = data.get("width", 1024)
-        original_height = data.get("height", 1024)
-
-        width = ((original_width + 7) // 8) * 8
-        height = ((original_height + 7) // 8) * 8
-
-        offset_x = (width - original_width) // 2
-        offset_y = (height - original_height) // 2
-
-        if seed is not None:
-            generator = torch.manual_seed(seed)
-        else:
-            generator = None
-
-        if image_format not in ["jpeg", "png"]:
-            return jsonify({"error": "Invalid image format. Choose 'jpeg' or 'png'."}), 400
-
-        images_data = data.get("images", [])
-        masks_data = data.get("masks", [])
-
-        def process_image_data(image_data):
-            if isinstance(image_data, list):
-                return [process_image_data(img) for img in image_data]
-            elif isinstance(image_data, dict):
-                image = base64.b64decode(image_data["image"].split(",")[1])
-                image = Image.open(io.BytesIO(image)).convert("RGBA")
-                return {
-                    "x": image_data.get("x", 0),
-                    "y": image_data.get("y", 0),
-                    "sx": image_data.get("sx", 1),
-                    "sy": image_data.get("sy", 1),
-                    "image": image
-                }
-            else:
-                image = base64.b64decode(image_data.split(",")[1])
-                return Image.open(io.BytesIO(image)).convert("RGBA")
-
-        images = process_image_data(images_data)
-        masks = process_image_data(masks_data) if masks_data else None
-
-        def compose_images(images, width, height, offset_x=0, offset_y=0):
-            composite_image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            for image_data in images:
-                if isinstance(image_data, dict):
-                    image = image_data["image"]
-                    x = image_data["x"]
-                    y = image_data["y"]
-                    sx = image_data["sx"]
-                    sy = image_data["sy"]
-                    if (sx != 1) or (sy != 1):
-                        image = image.resize((int(image.width * sx), int(image.height * sy)))
-                    composite_image.paste(image, (offset_x + x, offset_y + y), image)
-                else:
-                    composite_image.paste(image_data, (offset_x, offset_y))
-            return composite_image
-
-        composite_image = compose_images(images, width, height, offset_x, offset_y).convert("RGB")
-        composite_mask = compose_images(masks, width, height, offset_x, offset_y).convert("L") if masks else None
-        #Convert to tensor
-        composite_image_tensor = torch.from_numpy(np.array(composite_image)).float() / 255.0
-        composite_image_tensor = composite_image_tensor.permute(2, 0, 1).unsqueeze(0)
-
-        if composite_mask is not None and apply_mask:
-            composite_mask_tensor = torch.from_numpy(np.array(composite_mask)).float() / 255.0
-            composite_mask_tensor = composite_mask_tensor.unsqueeze(0).unsqueeze(0)
-        else:
-            #create a white mask
-            white_mask = Image.new("L", (width, height), 255)
-            composite_mask_tensor = torch.from_numpy(np.array(white_mask)).float() / 255.0
-            composite_mask_tensor = composite_mask_tensor.unsqueeze(0).unsqueeze(0)
-
-        # Convert to fp16 and move to CUDA
-        composite_image_tensor = composite_image_tensor.half().to(device)
-        if composite_mask_tensor is not None:
-            composite_mask_tensor = composite_mask_tensor.half().to(device)
-
-        # Print size
-        #print(composite_image_tensor.size())
-        #print(composite_mask_tensor.size() if composite_mask_tensor is not None else None)
-
-        # Generate the image using the composite image and mask
-        generated_image = pipe(
-            prompt,
-            negative_prompt=negative_prompt,
-            image=composite_image_tensor,
-            mask_image=composite_mask_tensor,
-            height=height,
-            width=width,
-            strength=strength,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator).images[0]
+        image_params = parse_image_params(data)
         
-        #print("generated_image size:", generated_image.size)
-        #print("composite_mask size:", composite_mask.size if composite_mask is not None else None)
-        #print("composite_mask_tensor size:", composite_mask_tensor.size() if composite_mask_tensor is not None else None)
-
-        if extract_mask and composite_mask_tensor is not None:
-            # Extract the generated content using the mask
-            generated_image = Image.composite(generated_image.convert("RGBA"), Image.new("RGBA", generated_image.size, extract_color), composite_mask)
-        else:
-            generated_image = generated_image
-
-        gen_width, gen_height = generated_image.size
-        if (gen_width != original_width) or (gen_width != original_height):
-            left = (gen_width - original_width) // 2
-            top = (gen_height - original_height) // 2
-            right = left + original_width
-            bottom = top + original_height
-            generated_image = generated_image.crop((left, top, right, bottom))
-
-        buffer = io.BytesIO()
-        if image_format == "jpeg":
-            # Convert the image to RGB color mode for JPEG format
-            generated_image = generated_image.convert("RGB")
-
-        generated_image.save(buffer, format=image_format)
-        mime_type = "image/jpeg" if image_format == "jpeg" else "image/png"
-        data_uri = "data:" + mime_type + ";base64," + base64.b64encode(buffer.getvalue()).decode('utf-8')
-
-        return jsonify({"image": data_uri})
+        composite_image, composite_mask = process_input_images(data, image_params)
+        
+        generated_image = generate_image_with_pipe(pipe, image_params, composite_image, composite_mask)
+        
+        if image_params['extract_mask'] and composite_mask is not None:
+            generated_image = extract_masked_content(generated_image, composite_mask, image_params['extract_color'])
+        
+        return jsonify({"image": encode_image(generated_image, image_params['format'])})
 
     except Exception as e:
         logger.exception("Error generating img2img")
         return jsonify({"error": str(e)}), 500
 
+def parse_image_params(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Parse and validate image generation parameters from request data.
+    """
+    params = {
+        "prompt": data["prompt"],
+        "negative_prompt": data.get("negative_prompt"),
+        "num_inference_steps": data.get("num_inference_steps", 30),
+        "guidance_scale": data.get("guidance_scale", 7.5),
+        "seed": data.get("seed"),
+        "format": data.get("format", "jpeg").lower(),
+        "width": ((data.get("width", 1024) + 7) // 8) * 8,
+        "height": ((data.get("height", 1024) + 7) // 8) * 8,
+        "strength": data.get("strength", 0.8),
+        "extract_mask": data.get("extract_mask", False),
+        "apply_mask": data.get("apply_mask", True),
+        "extract_color": parse_extract_color(data.get("extract_color", (0, 0, 0, 0))),
+    }
+    
+    if params["format"] not in ["jpeg", "png"]:
+        raise ValueError("Invalid image format. Choose 'jpeg' or 'png'.")
+    
+    return params
+
+def parse_extract_color(extract_color: Any) -> Tuple[int, int, int, int]:
+    """
+    Parse the extract_color parameter into a tuple of integers.
+    """
+    if isinstance(extract_color, list):
+        return tuple(extract_color)
+    elif isinstance(extract_color, str):
+        return tuple(map(int, extract_color.split(",")))
+    elif isinstance(extract_color, tuple):
+        return extract_color
+    else:
+        return (0, 0, 0, 0)  # Default to transparent black if invalid format
+
+def create_init_image_and_mask(width: int, height: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Create initial image and mask tensors for image generation.
+    """
+    init_image = Image.new("RGB", (width, height))
+    init_image_tensor = torch.from_numpy(np.array(init_image)).float() / 255.0
+    init_image_tensor = init_image_tensor.permute(2, 0, 1).unsqueeze(0).half().to(device)
+
+    white_mask = Image.new("L", (width, height), 255)
+    mask_tensor = torch.from_numpy(np.array(white_mask)).float() / 255.0
+    mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0).half().to(device)
+
+    return init_image_tensor, mask_tensor
+
+def process_input_images(data: Dict[str, Any], image_params: Dict[str, Any]) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Process input images and masks for img2img generation.
+    """
+    images = process_image_data(data.get("images", []))
+    masks = process_image_data(data.get("masks", [])) if data.get("masks") else None
+
+    composite_image = compose_images(images, image_params['width'], image_params['height'])
+    composite_mask = compose_images(masks, image_params['width'], image_params['height']) if masks else None
+
+    composite_image_tensor = image_to_tensor(composite_image)
+    composite_mask_tensor = mask_to_tensor(composite_mask) if composite_mask else create_white_mask_tensor(image_params['width'], image_params['height'])
+
+    return composite_image_tensor, composite_mask_tensor
+
+def image_to_tensor(image: Image.Image) -> torch.Tensor:
+    """
+    Convert a PIL Image to a PyTorch tensor.
+    """
+    tensor = torch.from_numpy(np.array(image)).float() / 255.0
+    return tensor.permute(2, 0, 1).unsqueeze(0).half().to(device)
+
+def mask_to_tensor(mask: Image.Image) -> torch.Tensor:
+    """
+    Convert a PIL mask image to a PyTorch tensor.
+    """
+    tensor = torch.from_numpy(np.array(mask)).float() / 255.0
+    return tensor.unsqueeze(0).unsqueeze(0).half().to(device)
+
+def create_white_mask_tensor(width: int, height: int) -> torch.Tensor:
+    """
+    Create a white mask tensor.
+    """
+    white_mask = Image.new("L", (width, height), 255)
+    return mask_to_tensor(white_mask)
+
+def generate_image_with_pipe(
+    pipe: StableDiffusionXLInpaintPipeline,
+    params: Dict[str, Any],
+    image: torch.Tensor,
+    mask: torch.Tensor
+) -> Image.Image:
+    """
+    Generate an image using the Stable Diffusion XL pipeline.
+    """
+    generator = torch.manual_seed(params['seed']) if params['seed'] is not None else None
+
+    generated_image = pipe(
+        prompt=params['prompt'],
+        negative_prompt=params['negative_prompt'],
+        image=image,
+        mask_image=mask,
+        height=params['height'],
+        width=params['width'],
+        strength=params['strength'],
+        num_inference_steps=params['num_inference_steps'],
+        guidance_scale=params['guidance_scale'],
+        generator=generator
+    ).images[0]
+
+    return crop_image(generated_image, params['width'], params['height'])
+
+def crop_image(image: Image.Image, target_width: int, target_height: int) -> Image.Image:
+    """
+    Crop the generated image to the target dimensions.
+    """
+    width, height = image.size
+    if (width != target_width) or (height != target_height):
+        left = (width - target_width) // 2
+        top = (height - target_height) // 2
+        right = left + target_width
+        bottom = top + target_height
+        return image.crop((left, top, right, bottom))
+    return image
+
+def extract_masked_content(
+    generated_image: Image.Image,
+    mask: torch.Tensor,
+    extract_color: Tuple[int, int, int, int]
+) -> Image.Image:
+    """
+    Extract the generated content using the mask.
+    """
+    mask_image = Image.fromarray((mask.squeeze().cpu().numpy() * 255).astype(np.uint8), mode='L')
+    return Image.composite(generated_image.convert("RGBA"), Image.new("RGBA", generated_image.size, extract_color), mask_image)
+
+def encode_image(image: Image.Image, format: str) -> str:
+    """
+    Encode the image to a base64 data URI.
+    """
+    buffer = io.BytesIO()
+    if format == "jpeg":
+        image = image.convert("RGB")
+    image.save(buffer, format=format)
+    mime_type = f"image/{format}"
+    return f"data:{mime_type};base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
 
 if __name__ == '__main__':
     app.run(host=args.host, port=args.port)
