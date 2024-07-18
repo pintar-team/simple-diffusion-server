@@ -41,7 +41,7 @@ else:
         scheduler=os.getenv('SCHEDULER', 'euler_a'),
         host=os.getenv('HOST', '0.0.0.0'),
         port=int(os.getenv('PORT', 8001)),
-        vae=os.getenv('VAE_MODEL', 'madebyollin/sdxl-vae-fp16-fix')
+        vae=os.getenv('VAE_MODEL', '')
     )
 
 def load_models() -> StableDiffusionXLInpaintPipeline:

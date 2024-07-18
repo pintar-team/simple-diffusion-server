@@ -14,7 +14,7 @@ def parse_args():
     parser.add_argument('--scheduler', type=str, default='euler_a', help='Scheduler')
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Host')
     parser.add_argument('--port', type=int, default=8001, help='Port')
-    parser.add_argument('--vae', type=str, default='madebyollin/sdxl-vae-fp16-fix', help='Model name for VAE')
+    parser.add_argument('--vae', type=str, default='', help='Model name for VAE')
     return parser.parse_args()
 
 def is_local_file(path):
