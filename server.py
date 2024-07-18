@@ -17,7 +17,7 @@ from diffusers import (
     AutoencoderKL
 )
 
-from utils import parse_args, Args, is_local_file, process_image_data, compose_images
+from utils import parse_args, Args, is_local_file
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -75,7 +75,6 @@ def load_models() -> StableDiffusionXLInpaintPipeline:
     set_scheduler(pipe)
 
     pipe.to(device)
-    # Uncomment the following lines if you want to enable these optimizations
     pipe.enable_vae_slicing()
     pipe.enable_attention_slicing()
 
@@ -133,7 +132,13 @@ def generate_img2img():
         data = request.json
         image_params = parse_image_params(data)
         
-        composite_image, composite_mask = process_input_images(data, image_params)
+        images_data = data.get("images", [])
+        masks_data = data.get("masks", [])
+
+        images = process_image_data(images_data)
+        masks = process_image_data(masks_data) if masks_data else None
+
+        composite_image, composite_mask = compose_images(images, masks, image_params)
         
         generated_image = generate_image_with_pipe(pipe, image_params, composite_image, composite_mask)
         
@@ -155,10 +160,10 @@ def parse_image_params(data: Dict[str, Any]) -> Dict[str, Any]:
     # Required parameters
     if "prompt" not in data:
         raise ValueError("Prompt is required")
-    params["prompt"] = data["prompt"]
+    params["prompt"] = data["prompt"][:300]  # Trim to 300 symbols
 
     # Optional parameters with default values
-    params["negative_prompt"] = data.get("negative_prompt", "")
+    params["negative_prompt"] = data.get("negative_prompt", "")[:300]  # Trim to 300 symbols
     params["num_inference_steps"] = int(data.get("num_inference_steps", 30))
     params["guidance_scale"] = float(data.get("guidance_scale", 7.5))
     params["seed"] = int(data.get("seed")) if data.get("seed") is not None else None
@@ -204,78 +209,88 @@ def parse_extract_color(extract_color: Any) -> Tuple[int, int, int, int]:
     else:
         return (0, 0, 0, 0)  # Default to transparent black if invalid format
 
-def create_init_image_and_mask(width: int, height: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def create_init_image_and_mask(width: int, height: int) -> Tuple[Image.Image, Image.Image]:
     """
-    Create initial image and mask tensors for image generation.
+    Create initial image and mask for image generation.
     """
     init_image = Image.new("RGB", (width, height))
-    init_image_tensor = torch.from_numpy(np.array(init_image)).float() / 255.0
-    init_image_tensor = init_image_tensor.permute(2, 0, 1).unsqueeze(0).half().to(device)
-
     white_mask = Image.new("L", (width, height), 255)
-    mask_tensor = torch.from_numpy(np.array(white_mask)).float() / 255.0
-    mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0).half().to(device)
+    return init_image, white_mask
 
-    return init_image_tensor, mask_tensor
+def process_image_data(image_data):
+    if isinstance(image_data, list):
+        return [process_image_data(img) for img in image_data]
+    elif isinstance(image_data, dict):
+        image = base64.b64decode(image_data["image"].split(",")[1])
+        image = Image.open(io.BytesIO(image)).convert("RGBA")
+        return {
+            "x": image_data.get("x", 0),
+            "y": image_data.get("y", 0),
+            "sx": image_data.get("sx", 1),
+            "sy": image_data.get("sy", 1),
+            "image": image
+        }
+    else:
+        image = base64.b64decode(image_data.split(",")[1])
+        return Image.open(io.BytesIO(image)).convert("RGBA")
 
-def process_input_images(data: Dict[str, Any], image_params: Dict[str, Any]) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """
-    Process input images and masks for img2img generation.
-    """
-    images = process_image_data(data.get("images", []))
-    masks = process_image_data(data.get("masks", [])) if data.get("masks") else None
+def compose_images(images, masks, image_params):
+    width = image_params['width']
+    height = image_params['height']
+    offset_x = (width - image_params.get("original_width", width)) // 2
+    offset_y = (height - image_params.get("original_height", height)) // 2
 
-    composite_image = compose_images(images, image_params['width'], image_params['height'])
-    composite_mask = compose_images(masks, image_params['width'], image_params['height']) if masks else None
+    composite_image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for image_data in images:
+        if isinstance(image_data, dict):
+            image = image_data["image"]
+            x = image_data["x"]
+            y = image_data["y"]
+            sx = image_data["sx"]
+            sy = image_data["sy"]
+            if (sx != 1) or (sy != 1):
+                image = image.resize((int(image.width * sx), int(image.height * sy)))
+            composite_image.paste(image, (offset_x + x, offset_y + y), image)
+        else:
+            composite_image.paste(image_data, (offset_x, offset_y))
+    
+    composite_image = composite_image.convert("RGB")
+    
+    if masks:
+        composite_mask = Image.new("L", (width, height), 0)
+        for mask_data in masks:
+            if isinstance(mask_data, dict):
+                mask = mask_data["image"].convert("L")
+                x = mask_data["x"]
+                y = mask_data["y"]
+                sx = mask_data["sx"]
+                sy = mask_data["sy"]
+                if (sx != 1) or (sy != 1):
+                    mask = mask.resize((int(mask.width * sx), int(mask.height * sy)))
+                composite_mask.paste(mask, (offset_x + x, offset_y + y), mask)
+            else:
+                composite_mask.paste(mask_data.convert("L"), (offset_x, offset_y))
+    else:
+        composite_mask = Image.new("L", (width, height), 255)
 
-    composite_image_tensor = image_to_tensor(composite_image)
-    composite_mask_tensor = mask_to_tensor(composite_mask) if composite_mask else create_white_mask_tensor(image_params['width'], image_params['height'])
-
-    return composite_image_tensor, composite_mask_tensor
-
-def image_to_tensor(image: Image.Image) -> torch.Tensor:
-    """
-    Convert a PIL Image to a PyTorch tensor.
-    """
-    tensor = torch.from_numpy(np.array(image)).float() / 255.0
-    return tensor.permute(2, 0, 1).unsqueeze(0).half().to(device)
-
-def mask_to_tensor(mask: Image.Image) -> torch.Tensor:
-    """
-    Convert a PIL mask image to a PyTorch tensor.
-    """
-    tensor = torch.from_numpy(np.array(mask)).float() / 255.0
-    return tensor.unsqueeze(0).unsqueeze(0).half().to(device)
-
-def create_white_mask_tensor(width: int, height: int) -> torch.Tensor:
-    """
-    Create a white mask tensor.
-    """
-    white_mask = Image.new("L", (width, height), 255)
-    return mask_to_tensor(white_mask)
+    return composite_image, composite_mask
 
 def generate_image_with_pipe(
     pipe: StableDiffusionXLInpaintPipeline,
     params: Dict[str, Any],
-    image: torch.Tensor,
-    mask: torch.Tensor
+    image: Image.Image,
+    mask: Image.Image
 ) -> Image.Image:
     """
     Generate an image using the Stable Diffusion XL pipeline.
     """
     generator = torch.manual_seed(params['seed']) if params['seed'] is not None else None
 
-    # Convert image tensor to PIL Image
-    image_pil = Image.fromarray((image.squeeze().permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
-    
-    # Convert mask tensor to PIL Image
-    mask_pil = Image.fromarray((mask.squeeze().cpu().numpy() * 255).astype(np.uint8), mode='L')
-
     generated_image = pipe(
         prompt=params['prompt'],
         negative_prompt=params['negative_prompt'],
-        image=image_pil,
-        mask_image=mask_pil,
+        image=image,
+        mask_image=mask,
         height=params['height'],
         width=params['width'],
         strength=params['strength'],
@@ -301,14 +316,13 @@ def crop_image(image: Image.Image, target_width: int, target_height: int) -> Ima
 
 def extract_masked_content(
     generated_image: Image.Image,
-    mask: torch.Tensor,
+    mask: Image.Image,
     extract_color: Tuple[int, int, int, int]
 ) -> Image.Image:
     """
     Extract the generated content using the mask.
     """
-    mask_image = Image.fromarray((mask.squeeze().cpu().numpy() * 255).astype(np.uint8), mode='L')
-    return Image.composite(generated_image.convert("RGBA"), Image.new("RGBA", generated_image.size, extract_color), mask_image)
+    return Image.composite(generated_image.convert("RGBA"), Image.new("RGBA", generated_image.size, extract_color), mask)
 
 def encode_image(image: Image.Image, format: str) -> str:
     """
