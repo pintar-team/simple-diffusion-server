@@ -150,24 +150,45 @@ def parse_image_params(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Parse and validate image generation parameters from request data.
     """
-    params = {
-        "prompt": data["prompt"],
-        "negative_prompt": data.get("negative_prompt"),
-        "num_inference_steps": data.get("num_inference_steps", 30),
-        "guidance_scale": data.get("guidance_scale", 7.5),
-        "seed": data.get("seed"),
-        "format": data.get("format", "jpeg").lower(),
-        "width": ((data.get("width", 1024) + 7) // 8) * 8,
-        "height": ((data.get("height", 1024) + 7) // 8) * 8,
-        "strength": data.get("strength", 0.8),
-        "extract_mask": data.get("extract_mask", False),
-        "apply_mask": data.get("apply_mask", True),
-        "extract_color": parse_extract_color(data.get("extract_color", (0, 0, 0, 0))),
-    }
-    
+    params = {}
+
+    # Required parameters
+    if "prompt" not in data:
+        raise ValueError("Prompt is required")
+    params["prompt"] = data["prompt"]
+
+    # Optional parameters with default values
+    params["negative_prompt"] = data.get("negative_prompt", "")
+    params["num_inference_steps"] = int(data.get("num_inference_steps", 30))
+    params["guidance_scale"] = float(data.get("guidance_scale", 7.5))
+    params["seed"] = int(data.get("seed")) if data.get("seed") is not None else None
+    params["format"] = data.get("format", "jpeg").lower()
+    params["width"] = ((int(data.get("width", 1024)) + 7) // 8) * 8
+    params["height"] = ((int(data.get("height", 1024)) + 7) // 8) * 8
+    params["strength"] = float(data.get("strength", 0.8))
+    params["extract_mask"] = bool(data.get("extract_mask", False))
+    params["apply_mask"] = bool(data.get("apply_mask", True))
+    params["extract_color"] = parse_extract_color(data.get("extract_color", (0, 0, 0, 0)))
+
+    # Validate parameters
     if params["format"] not in ["jpeg", "png"]:
         raise ValueError("Invalid image format. Choose 'jpeg' or 'png'.")
     
+    if params["num_inference_steps"] < 1 or params["num_inference_steps"] > 150:
+        raise ValueError("num_inference_steps must be between 1 and 150")
+    
+    if params["guidance_scale"] < 0 or params["guidance_scale"] > 20:
+        raise ValueError("guidance_scale must be between 0 and 20")
+    
+    if params["width"] < 128 or params["width"] > 2048:
+        raise ValueError("Width must be between 128 and 2048")
+    
+    if params["height"] < 128 or params["height"] > 2048:
+        raise ValueError("Height must be between 128 and 2048")
+    
+    if params["strength"] < 0 or params["strength"] > 1:
+        raise ValueError("Strength must be between 0 and 1")
+
     return params
 
 def parse_extract_color(extract_color: Any) -> Tuple[int, int, int, int]:
@@ -244,11 +265,17 @@ def generate_image_with_pipe(
     """
     generator = torch.manual_seed(params['seed']) if params['seed'] is not None else None
 
+    # Convert image tensor to PIL Image
+    image_pil = Image.fromarray((image.squeeze().permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
+    
+    # Convert mask tensor to PIL Image
+    mask_pil = Image.fromarray((mask.squeeze().cpu().numpy() * 255).astype(np.uint8), mode='L')
+
     generated_image = pipe(
         prompt=params['prompt'],
         negative_prompt=params['negative_prompt'],
-        image=image,
-        mask_image=mask,
+        image=image_pil,
+        mask_image=mask_pil,
         height=params['height'],
         width=params['width'],
         strength=params['strength'],
