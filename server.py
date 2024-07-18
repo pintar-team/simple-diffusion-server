@@ -311,9 +311,12 @@ def generate_image_with_pipe(
     """
     Generate an image using the Stable Diffusion XL pipeline.
     """
-    if 'seed' in kwargs:
-        generator = torch.manual_seed(kwargs.pop('seed'))
+    seed = kwargs.pop('seed', None)
+    if seed is not None:
+        generator = torch.manual_seed(int(seed))
         kwargs['generator'] = generator
+    else:
+        kwargs['generator'] = None
 
     generated_image = pipe(**kwargs).images[0]
     return crop_image(generated_image, kwargs['width'], kwargs['height'])
