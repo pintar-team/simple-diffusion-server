@@ -120,7 +120,7 @@ def generate_image():
         
         init_image_tensor = image_to_tensor(init_image)
         init_mask_tensor = mask_to_tensor(init_mask, image_params)
-        
+        image_params['strength'] = 1.0  # Reset strength for single image generation
         generated_image = generate_image_with_pipe(pipe, image_params, init_image_tensor, init_mask_tensor)
         
         return jsonify({"image": encode_image(generated_image, image_params['format'])})
@@ -176,7 +176,7 @@ def parse_image_params(data: Dict[str, Any]) -> Dict[str, Any]:
     params["height"] = ((params["original_height"] + 7) // 8) * 8
     params["offset_x"] = (params["width"] - params["original_width"]) // 2
     params["offset_y"] = (params["height"] - params["original_height"]) // 2
-    params["strength"] = float(data.get("strength", 0.8))
+    params["strength"] = float(data.get("strength", 1.0))
     params["extract_mask"] = bool(data.get("extract_mask", False))
     params["apply_mask"] = bool(data.get("apply_mask", True))
     params["extract_color"] = parse_extract_color(data.get("extract_color", (0, 0, 0, 0)))
