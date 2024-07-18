@@ -166,6 +166,11 @@ def generate_img2img():
         }
         
         if image_params['apply_mask'] and composite_mask is not None:
+            # Ensure the mask is a PIL Image
+            if isinstance(composite_mask, np.ndarray):
+                composite_mask = Image.fromarray(composite_mask.astype(np.uint8))
+            elif isinstance(composite_mask, torch.Tensor):
+                composite_mask = Image.fromarray(composite_mask.cpu().numpy().astype(np.uint8))
             generation_args["mask_image"] = composite_mask
         
         generated_image = generate_image_with_pipe(pipe, **generation_args)
@@ -178,6 +183,7 @@ def generate_img2img():
     except Exception as e:
         logger.exception("Error generating img2img")
         return jsonify({"error": str(e)}), 500
+
 
 def parse_image_params(data: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -304,6 +310,7 @@ def compose_images(images, masks, image_params):
     return composite_image, composite_mask
 
 
+
 def generate_image_with_pipe(
     pipe: StableDiffusionXLInpaintPipeline,
     **kwargs
@@ -317,6 +324,19 @@ def generate_image_with_pipe(
         kwargs['generator'] = generator
     else:
         kwargs['generator'] = None
+
+    # Ensure image is a PIL Image
+    if isinstance(kwargs['image'], np.ndarray):
+        kwargs['image'] = Image.fromarray(kwargs['image'].astype(np.uint8))
+    elif isinstance(kwargs['image'], torch.Tensor):
+        kwargs['image'] = Image.fromarray(kwargs['image'].cpu().numpy().astype(np.uint8))
+
+    # Ensure mask_image is a PIL Image if it exists
+    if 'mask_image' in kwargs and kwargs['mask_image'] is not None:
+        if isinstance(kwargs['mask_image'], np.ndarray):
+            kwargs['mask_image'] = Image.fromarray(kwargs['mask_image'].astype(np.uint8))
+        elif isinstance(kwargs['mask_image'], torch.Tensor):
+            kwargs['mask_image'] = Image.fromarray(kwargs['mask_image'].cpu().numpy().astype(np.uint8))
 
     generated_image = pipe(**kwargs).images[0]
     return crop_image(generated_image, kwargs['width'], kwargs['height'])
