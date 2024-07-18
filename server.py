@@ -50,25 +50,26 @@ def load_models() -> StableDiffusionXLInpaintPipeline:
     """
     logger.info("Loading models...")
     
-    if args.vae == '' or args.vae == 'baked':
-        vae = None
-    else:
+    pipeline_args = {
+        "torch_dtype": torch.bfloat16,
+        "variant": "fp16",
+        "use_safetensors": True,
+        "num_in_channels": 4,
+        "ignore_mismatched_sizes": True
+    }
+
+    if args.vae and args.vae != 'baked':
         vae = AutoencoderKL.from_pretrained(args.vae, torch_dtype=torch.bfloat16, variant="fp16")
+        pipeline_args["vae"] = vae
 
     if args.unet:
         unet = UNet2DConditionModel.from_pretrained(args.unet, torch_dtype=torch.bfloat16, variant="fp16")
-    else:
-        unet = None
+        pipeline_args["unet"] = unet
 
     if is_local_file(args.model):
-        pipe = StableDiffusionXLInpaintPipeline.from_single_file(
-            args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16",
-            use_safetensors=True, num_in_channels=4, ignore_mismatched_sizes=True
-        )
+        pipe = StableDiffusionXLInpaintPipeline.from_single_file(args.model, **pipeline_args)
     else:
-        pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
-            args.model, vae=vae, unet=unet, torch_dtype=torch.bfloat16, variant="fp16"
-        )
+        pipe = StableDiffusionXLInpaintPipeline.from_pretrained(args.model, **pipeline_args)
 
     load_and_fuse_lora(pipe)
     set_scheduler(pipe)
