@@ -118,7 +118,20 @@ def generate_image():
         
         init_image, init_mask = create_init_image_and_mask(image_params['width'], image_params['height'])
         
-        generated_image = generate_image_with_pipe(pipe, image_params, init_image, init_mask)
+        generation_args = {
+            "prompt": image_params['prompt'],
+            "negative_prompt": image_params['negative_prompt'],
+            "image": init_image,
+            "mask_image": init_mask,
+            "height": image_params['height'],
+            "width": image_params['width'],
+            "strength": 1.0,  # For text-to-image, we use full strength
+            "num_inference_steps": image_params['num_inference_steps'],
+            "guidance_scale": image_params['guidance_scale'],
+            "seed": image_params['seed']
+        }
+        
+        generated_image = generate_image_with_pipe(pipe, **generation_args)
         
         return jsonify({"image": encode_image(generated_image, image_params['format'])})
 
@@ -140,7 +153,22 @@ def generate_img2img():
 
         composite_image, composite_mask = compose_images(images, masks, image_params)
         
-        generated_image = generate_image_with_pipe(pipe, image_params, composite_image, composite_mask)
+        generation_args = {
+            "prompt": image_params['prompt'],
+            "negative_prompt": image_params['negative_prompt'],
+            "image": composite_image,
+            "height": image_params['height'],
+            "width": image_params['width'],
+            "strength": image_params['strength'],
+            "num_inference_steps": image_params['num_inference_steps'],
+            "guidance_scale": image_params['guidance_scale'],
+            "seed": image_params['seed']
+        }
+        
+        if image_params['apply_mask'] and composite_mask is not None:
+            generation_args["mask_image"] = composite_mask
+        
+        generated_image = generate_image_with_pipe(pipe, **generation_args)
         
         if image_params['extract_mask'] and composite_mask is not None:
             generated_image = extract_masked_content(generated_image, composite_mask, image_params['extract_color'])
@@ -275,31 +303,20 @@ def compose_images(images, masks, image_params):
 
     return composite_image, composite_mask
 
+
 def generate_image_with_pipe(
     pipe: StableDiffusionXLInpaintPipeline,
-    params: Dict[str, Any],
-    image: Image.Image,
-    mask: Image.Image
+    **kwargs
 ) -> Image.Image:
     """
     Generate an image using the Stable Diffusion XL pipeline.
     """
-    generator = torch.manual_seed(params['seed']) if params['seed'] is not None else None
+    if 'seed' in kwargs:
+        generator = torch.manual_seed(kwargs.pop('seed'))
+        kwargs['generator'] = generator
 
-    generated_image = pipe(
-        prompt=params['prompt'],
-        negative_prompt=params['negative_prompt'],
-        image=image,
-        mask_image=mask,
-        height=params['height'],
-        width=params['width'],
-        strength=params['strength'],
-        num_inference_steps=params['num_inference_steps'],
-        guidance_scale=params['guidance_scale'],
-        generator=generator
-    ).images[0]
-
-    return crop_image(generated_image, params['width'], params['height'])
+    generated_image = pipe(**kwargs).images[0]
+    return crop_image(generated_image, kwargs['width'], kwargs['height'])
 
 def crop_image(image: Image.Image, target_width: int, target_height: int) -> Image.Image:
     """
