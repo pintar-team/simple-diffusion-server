@@ -3,6 +3,8 @@ import io
 import base64
 import logging
 from typing import Optional, Tuple, List, Dict, Any
+import threading
+import queue
 
 import torch
 import numpy as np
@@ -110,10 +112,73 @@ pipe = load_models()
 # Initialize Flask app
 app = Flask(__name__)
 
+# Create a queue for incoming requests
+request_queue = queue.Queue()
+
+# Create an event to signal when a response is ready
+response_ready = threading.Event()
+
+# Create a dictionary to store responses
+responses = {}
+
+def worker():
+    while True:
+        # Get a request from the queue
+        request_id, endpoint, data = request_queue.get()
+        
+        try:
+            if endpoint == 'generate-image':
+                result = process_generate_image(data)
+            elif endpoint == 'generate-img2img':
+                result = process_generate_img2img(data)
+            else:
+                result = {"error": "Unknown endpoint"}
+            
+            # Store the result
+            responses[request_id] = result
+            
+            # Signal that the response is ready
+            response_ready.set()
+        except Exception as e:
+            logger.exception(f"Error processing request {request_id}")
+            responses[request_id] = {"error": str(e)}
+            response_ready.set()
+        
+        # Mark the task as done
+        request_queue.task_done()
+
+# Start the worker thread
+worker_thread = threading.Thread(target=worker, daemon=True)
+worker_thread.start()
+
 @app.route('/generate-image', methods=['POST'])
 def generate_image():
+    request_id = id(request)
+    request_queue.put((request_id, 'generate-image', request.json))
+    
+    # Wait for the response
+    while True:
+        response_ready.wait()
+        response_ready.clear()
+        if request_id in responses:
+            result = responses.pop(request_id)
+            return jsonify(result)
+
+@app.route('/generate-img2img', methods=['POST'])
+def generate_img2img():
+    request_id = id(request)
+    request_queue.put((request_id, 'generate-img2img', request.json))
+    
+    # Wait for the response
+    while True:
+        response_ready.wait()
+        response_ready.clear()
+        if request_id in responses:
+            result = responses.pop(request_id)
+            return jsonify(result)
+
+def process_generate_image(data):
     try:
-        data = request.json
         image_params = parse_image_params(data)
         
         init_image, init_mask = create_init_image_and_mask(image_params['width'], image_params['height'])
@@ -123,16 +188,13 @@ def generate_image():
         image_params['strength'] = 1.0  # Reset strength for single image generation
         generated_image = generate_image_with_pipe(pipe, image_params, init_image_tensor, init_mask_tensor)
         
-        return jsonify({"image": encode_image(generated_image, image_params['format'])})
-
+        return {"image": encode_image(generated_image, image_params['format'])}
     except Exception as e:
         logger.exception("Error generating image")
-        return jsonify({"error": str(e)}), 500
+        return {"error": str(e)}
 
-@app.route('/generate-img2img', methods=['POST'])
-def generate_img2img():
+def process_generate_img2img(data):
     try:
-        data = request.json
         image_params = parse_image_params(data)
         
         images_data = data.get("images", [])
@@ -156,11 +218,10 @@ def generate_img2img():
 
         generated_image = crop_image(generated_image, image_params['original_width'], image_params['original_height'])
 
-        return jsonify({"image": encode_image(generated_image, image_params['format'])})
-
+        return {"image": encode_image(generated_image, image_params['format'])}
     except Exception as e:
         logger.exception("Error generating img2img")
-        return jsonify({"error": str(e)}), 500
+        return {"error": str(e)}
 
 def parse_image_params(data: Dict[str, Any]) -> Dict[str, Any]:
     params = {}
