@@ -1,7 +1,5 @@
 flask
 diffusers
-torch
-torchvision
 pillow
 numpy
 gunicorn
