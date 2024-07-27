@@ -1,6 +1,6 @@
 flask
 diffusers
-torch=2.3.0
+torch==2.3.0
 pillow
 numpy
 gunicorn
