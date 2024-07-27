@@ -2,9 +2,11 @@ import os
 import io
 import base64
 import logging
+import time
 from typing import Optional, Tuple, List, Dict, Any
 import threading
 import queue
+import uuid
 
 import torch
 import numpy as np
@@ -147,35 +149,71 @@ def worker():
         # Mark the task as done
         request_queue.task_done()
 
-# Start the worker thread
-worker_thread = threading.Thread(target=worker, daemon=True)
-worker_thread.start()
+# Create a queue for incoming requests
+request_queue = queue.Queue()
+
+# Create a dictionary to store responses
+responses = {}
+
+# Create a lock for thread-safe operations on the responses dictionary
+responses_lock = threading.Lock()
+
+def worker():
+    while True:
+        # Get a request from the queue
+        request_id, endpoint, data = request_queue.get()
+        
+        try:
+            if endpoint == 'generate-image':
+                result = process_generate_image(data)
+            elif endpoint == 'generate-img2img':
+                result = process_generate_img2img(data)
+            else:
+                result = {"error": "Unknown endpoint"}
+            
+            # Store the result thread-safely
+            with responses_lock:
+                responses[request_id] = result
+            
+        except Exception as e:
+            logger.exception(f"Error processing request {request_id}")
+            with responses_lock:
+                responses[request_id] = {"error": str(e)}
+        
+        # Mark the task as done
+        request_queue.task_done()
+
+# Start multiple worker threads
+num_worker_threads = 1  # You can adjust this number based on your requirements
+for _ in range(num_worker_threads):
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+
+def wait_for_response(request_id, timeout=300):  # 5 minutes timeout
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        with responses_lock:
+            if request_id in responses:
+                return responses.pop(request_id)
+        time.sleep(0.1)  # Short sleep to prevent busy-waiting
+    return {"error": "Request timed out"}
 
 @app.route('/generate-image', methods=['POST'])
 def generate_image():
-    request_id = id(request)
+    request_id = str(uuid.uuid4())  # Generate a unique ID for each request
     request_queue.put((request_id, 'generate-image', request.json))
     
-    # Wait for the response
-    while True:
-        response_ready.wait()
-        response_ready.clear()
-        if request_id in responses:
-            result = responses.pop(request_id)
-            return jsonify(result)
+    result = wait_for_response(request_id)
+    return jsonify(result)
 
 @app.route('/generate-img2img', methods=['POST'])
 def generate_img2img():
-    request_id = id(request)
+    request_id = str(uuid.uuid4())  # Generate a unique ID for each request
     request_queue.put((request_id, 'generate-img2img', request.json))
     
-    # Wait for the response
-    while True:
-        response_ready.wait()
-        response_ready.clear()
-        if request_id in responses:
-            result = responses.pop(request_id)
-            return jsonify(result)
+    result = wait_for_response(request_id)
+    return jsonify(result)
+
 
 def process_generate_image(data):
     try:
